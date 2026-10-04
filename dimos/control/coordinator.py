@@ -382,6 +382,14 @@ class ControlCoordinator(Module):
                     except DescriptionError as error:
                         logger.error(f"Not driving {description.source!r}: {error}")
                         continue
+                    unholdable = ConnectionSource.unholdable_joints(description)
+                    if unholdable:
+                        logger.error(
+                            f"Not driving {description.source!r}: joint(s) {unholdable} "
+                            "accept neither position nor velocity, so they cannot be "
+                            "held when no task drives them"
+                        )
+                        continue
                     if description.source in found:
                         logger.error(
                             f"Two connection modules describe a robot called "

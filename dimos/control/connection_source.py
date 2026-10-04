@@ -79,6 +79,9 @@ class ConnectionSource:
 
     A base is told 0 on every axis. Sensors are never told anything.
 
+    Joints that accept only effort can't be held when idle, so the
+    coordinator won't drive a robot that has one (see ``unholdable_joints``).
+
     A robot whose readings stop for longer than its deadman timeout is no
     longer commanded; its connection's deadman halts it.
 
@@ -138,6 +141,21 @@ class ConnectionSource:
         # Joint name -> the position it is held at. Only the tick loop touches it.
         self._holds: dict[str, float] = {}
         self._last_warned = float("-inf")
+
+    @staticmethod
+    def unholdable_joints(description: ControlDescription) -> list[str]:
+        """The joints that can be told neither a position nor a velocity.
+
+        With no task driving them there is nothing safe to send: effort 0
+        lets an arm fall under gravity.
+        """
+        return [
+            resource.name
+            for resource in description.resources
+            if resource.kind is ResourceKind.JOINT
+            and POSITION not in resource.command_interfaces
+            and VELOCITY not in resource.command_interfaces
+        ]
 
     @property
     def hardware_id(self) -> str:

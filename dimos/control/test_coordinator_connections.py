@@ -36,7 +36,7 @@ import pytest
 from dimos.control.components import HardwareComponent, HardwareType, make_joints
 from dimos.control.connection.mock_connection import MockConnectionModule
 from dimos.control.contract.description import ControlDescription, Limits
-from dimos.control.contract.keys import POSITION, VX, VY, WZ, Key
+from dimos.control.contract.keys import EFFORT, POSITION, VX, VY, WZ, Key
 from dimos.control.contract.presets import (
     imu_resource,
     manipulator_description,
@@ -249,6 +249,21 @@ def test_one_failing_module_does_not_stop_the_rest(rig: Callable[..., Rig]) -> N
     r.find(broken, first, duplicate)
 
     assert r.coordinator.list_joints() == ["arm/joint1", "arm/joint2"]
+
+
+def test_a_robot_with_an_effort_only_joint_is_not_driven(
+    rig: Callable[..., Rig], mocker: Any
+) -> None:
+    error = mocker.patch.object(coord_mod.logger, "error")
+    r = rig()
+    limp = manipulator_description("limp", ["joint1"], state=(POSITION,), command=(EFFORT,))
+
+    r.find(StandIn("Limp", [limp]), StandIn("Mock", [arm()]))
+
+    assert r.coordinator.list_hardware() == ["arm"]
+    logged = str(error.call_args)
+    assert "'limp'" in logged
+    assert "joint1" in logged
 
 
 def test_every_proxy_it_was_given_is_closed(rig: Callable[..., Rig]) -> None:
