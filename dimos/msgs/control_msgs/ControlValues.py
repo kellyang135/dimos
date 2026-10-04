@@ -19,8 +19,9 @@ One publisher's sparse set of interface values, carried as parallel
 and lifecycle transitions travel over RPC, so this type stays deliberately thin:
 it pins the wire shape and rejects frames that are structurally impossible.
 
-Empty arrays are valid and encodable -- that is the coordinator's heartbeat,
-which carries an epoch and a sequence but commands nothing.
+Empty arrays are valid and encodable. Such a frame commands nothing, and it
+does not keep a robot connection's deadman alive: that is fed only by frames
+carrying the connection's own keys.
 
 Interface-name vocabulary, epoch and sequence rules, and per-interface limits
 are the control contract's business, not this type's.
