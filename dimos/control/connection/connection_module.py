@@ -100,9 +100,13 @@ class ConnectionModule(Module, ABC):
     sender that restarts counting from 0 is accepted. The next accepted
     command starts the deadman again.
 
-    ``write`` and ``halt`` never run at the same time. To close the hardware
-    connection when the module stops, override ``stop`` and close it after
-    calling ``super().stop()``, which halts the robot first.
+    ``write`` and ``halt`` never run at the same time. Commands and the
+    deadman share the module's event loop, so a ``write`` that hangs stops
+    both: the deadman cannot fire and no later command is handled until it
+    returns.
+
+    To close the hardware connection when the module stops, override ``stop``
+    and close it after calling ``super().stop()``, which halts the robot first.
     """
 
     dedicated_worker: ClassVar[bool] = True
@@ -313,7 +317,7 @@ class ConnectionModule(Module, ABC):
         with self._lock:
             self._last_command_time = time.time()
             self._deadman_fired = False
-        self._arm_deadman()
+        self._start_deadman()
         try:
             with self._hardware_lock:
                 if not self._connected:
@@ -321,15 +325,15 @@ class ConnectionModule(Module, ABC):
                 self.write(result.values)
         except Exception as error:
             self._report(f"write for {source!r} failed: {type(error).__name__}: {error}")
-            self._disarm_deadman()
+            self._cancel_deadman()
             self._halt()
 
-    def _arm_deadman(self) -> None:
-        self._disarm_deadman()
+    def _start_deadman(self) -> None:
+        self._cancel_deadman()
         loop = asyncio.get_running_loop()
         self._deadman_timer = loop.call_later(self._deadman_s, self._deadman_expired)
 
-    def _disarm_deadman(self) -> None:
+    def _cancel_deadman(self) -> None:
         if self._deadman_timer is not None:
             self._deadman_timer.cancel()
             self._deadman_timer = None

@@ -191,7 +191,7 @@ def test_readings_arrive_at_about_the_state_rate_numbered_in_order(
 def test_a_command_is_written_and_the_readings_follow(rig: Callable[..., Rig]) -> None:
     r = rig()
     r.send(1, {JOINT1: 0.5})
-    assert wait_until(lambda: r.module.writes == [{JOINT1: 0.5}])
+    assert wait_until(lambda: list(r.module.writes) == [{JOINT1: 0.5}])
     assert wait_until(lambda: any(f.as_dict()[JOINT1] == 0.5 for f in r.frames()))
     assert r.module.status().last_command_time is not None
 
@@ -201,7 +201,7 @@ def test_keys_of_other_robots_are_ignored(rig: Callable[..., Rig]) -> None:
     r.send(1, {"other/joint1/position": 9.0})
     r.send(2, {JOINT1: 0.5, "other/joint1/position": 9.0})
     assert wait_until(lambda: len(r.module.writes) == 1)
-    assert r.module.writes == [{JOINT1: 0.5}]
+    assert list(r.module.writes) == [{JOINT1: 0.5}]
     assert r.module.status().last_rejection is None
 
 
@@ -224,7 +224,7 @@ def test_two_robots_in_one_module_each_get_only_their_own_keys(
 def test_a_base_command_past_its_limit_is_pulled_back_to_it(rig: Callable[..., Rig]) -> None:
     r = rig(ArmAndBase)
     r.send(1, {"base/base/vx": 5.0})
-    assert wait_until(lambda: r.module.writes == [{"base/base/vx": 1.0}])
+    assert wait_until(lambda: list(r.module.writes) == [{"base/base/vx": 1.0}])
 
 
 def test_an_arm_command_past_its_limit_is_refused_and_shown(rig: Callable[..., Rig]) -> None:
@@ -232,7 +232,7 @@ def test_an_arm_command_past_its_limit_is_refused_and_shown(rig: Callable[..., R
     r.send(1, {JOINT1: 1.5})
     assert wait_until(lambda: r.module.status().last_rejection is not None)
     assert "limit" in str(r.module.status().last_rejection)
-    assert r.module.writes == []
+    assert list(r.module.writes) == []
 
 
 def test_an_old_or_repeated_command_is_refused(rig: Callable[..., Rig]) -> None:
@@ -260,7 +260,7 @@ def test_only_the_newest_command_is_written_when_write_is_slow(
     module.release.set()
     assert wait_until(lambda: len(module.writes) == 2)
     time.sleep(0.05)
-    assert module.writes == [{JOINT1: 0.1}, {JOINT1: 0.5}]
+    assert list(module.writes) == [{JOINT1: 0.1}, {JOINT1: 0.5}]
 
 
 def test_the_deadman_waits_for_the_first_command(rig: Callable[..., Rig]) -> None:
@@ -347,7 +347,7 @@ def test_stopping_halts_once_and_a_second_stop_is_harmless(rig: Callable[..., Ri
     assert not r.module.status().connected
     r.send(1, {JOINT1: 0.1})
     time.sleep(0.05)
-    assert r.module.writes == []
+    assert list(r.module.writes) == []
 
 
 def test_describe_control_and_status_are_rpcs_that_cross_processes(

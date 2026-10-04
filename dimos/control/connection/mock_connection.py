@@ -14,13 +14,14 @@
 
 """A pretend robot arm, for running and testing without hardware.
 
-Its joints are wherever they were last told to be, at once. It keeps every
-command passed to ``write`` and counts calls to ``halt``, so a test can see
-what reached the "hardware".
+Its joints are wherever they were last told to be, at once. It keeps the
+latest commands passed to ``write`` and counts calls to ``halt``, so a test
+can see what reached the "hardware".
 """
 
 from __future__ import annotations
 
+from collections import deque
 import math
 from typing import Any
 
@@ -58,8 +59,8 @@ class MockConnectionModule(ConnectionModule):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        #: Every command passed to ``write``, oldest first.
-        self.writes: list[dict[str, float]] = []
+        #: The last 1000 commands passed to ``write``, oldest first.
+        self.writes: deque[dict[str, float]] = deque(maxlen=1000)
         #: How many times ``halt`` has been called.
         self.halts = 0
         self._readings: dict[str, float] = {}
