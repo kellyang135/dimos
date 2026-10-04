@@ -365,6 +365,24 @@ def test_a_robot_described_differently_waits_for_a_reading_in_its_new_shape(
     assert len(r.sent[-1].interface_names) == 3
 
 
+def test_a_robot_whose_readings_stop_is_not_commanded(rig: Callable[..., Rig]) -> None:
+    r = rig()
+    description = arm(deadman_timeout_s=0.2)
+    r.find(StandIn("Mock", [description]))
+    r.report(description, {"arm/joint1/position": 0.3})
+    r.tick()
+    assert len(r.sent) == 1
+
+    time.sleep(0.3)
+    r.tick()
+    assert len(r.sent) == 1
+    assert r.coordinator.get_joint_positions()["arm/joint1"] == 0.3
+
+    r.report(description, {"arm/joint1/position": 0.3})
+    r.tick()
+    assert len(r.sent) == 2
+
+
 def test_with_the_option_on_a_robot_also_gets_its_own_topic(rig: Callable[..., Rig]) -> None:
     r = rig(ArmPortCoordinator, publish_robot_commands=True)
     own: list[ControlValues] = []

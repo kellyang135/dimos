@@ -479,9 +479,11 @@ class TickLoop:
         publish = self._command_callback
         if publish is None:
             return
+        now = time.monotonic()
         with self._hardware_lock:
             for name, source in self._connections.items():
-                if not source.ready_for_control():
+                # Not until it has reported again, nor once its readings stop.
+                if not source.ready_for_control(now):
                     continue
                 winners: dict[str, float] = {}
                 mode: ControlMode | None = None

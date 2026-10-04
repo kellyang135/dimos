@@ -31,6 +31,7 @@ import time
 
 from dimos.control.contract.description import ControlDescription, Limits, ResourceKind
 from dimos.control.contract.keys import EFFORT, POSITION, SEPARATOR, VELOCITY
+from dimos.control.contract.sequence import Freshness
 from dimos.control.contract.validate import FrameRejectedError, validate_state
 from dimos.control.task import JointStateSnapshot
 from dimos.hardware.manipulators.spec import ControlMode
@@ -78,6 +79,9 @@ class ConnectionSource:
 
     A base is told 0 on every axis. Sensors are never told anything.
 
+    A robot whose readings stop for longer than its deadman timeout is no
+    longer commanded; its connection's deadman halts it.
+
     What tasks ask for is sent as is, even past a limit or to an interface
     the robot does not accept. The connection module then refuses the whole
     frame, and if that keeps happening its deadman halts the robot.
@@ -123,6 +127,8 @@ class ConnectionSource:
         self._lock = threading.Lock()
         self._latest: dict[str, float] | None = None
         self._received_at = 0.0
+        # When the last reading was accepted, by time.monotonic().
+        self._freshness = Freshness()
         self._last_sequence: int | None = None
         # A reading numbered lower than the last arrived: the connection
         # restarted. The tick loop drops the holds when it sees this.
@@ -165,6 +171,7 @@ class ConnectionSource:
             self._last_sequence = frame.sequence
             self._latest = values
             self._received_at = time.time()
+            self._freshness.mark(time.monotonic())
             self._awaiting_reading = False
 
     def adopt(self, other: ConnectionSource) -> None:
@@ -176,18 +183,29 @@ class ConnectionSource:
         """
         with other._lock:
             latest, received_at = other._latest, other._received_at
+            last_receipt = other._freshness.last_receipt
             last_sequence, restarted = other._last_sequence, other._restarted
         with self._lock:
             self._latest, self._received_at = latest, received_at
+            self._freshness.last_receipt = last_receipt
             self._last_sequence, self._restarted = last_sequence, restarted
             self._awaiting_reading = True
         self._holds = dict(other._holds)
 
-    def ready_for_control(self) -> bool:
-        """Whether a command can be sent: the robot has reported, and has
-        reported again since it was last described."""
+    def ready_for_control(self, now: float | None = None) -> bool:
+        """Whether a command can be sent: the robot has reported again since it
+        was last described, and its last reading is no older than its deadman
+        timeout.
+
+        Args:
+            now: The current ``time.monotonic()``, in seconds. Defaults to now.
+        """
+        if now is None:
+            now = time.monotonic()
         with self._lock:
-            return self._latest is not None and not self._awaiting_reading
+            return not self._awaiting_reading and not self._freshness.is_stale(
+                now, self._description.deadman_timeout_s
+            )
 
     def read_joints(self) -> JointStateSnapshot:
         """The joints' latest positions, velocities and efforts.

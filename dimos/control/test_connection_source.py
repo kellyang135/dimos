@@ -16,6 +16,10 @@
 
 from __future__ import annotations
 
+import time
+
+import pytest
+
 from dimos.control.connection_source import ConnectionSource
 from dimos.control.contract.description import ControlDescription, Limits
 from dimos.control.contract.keys import POSITION, VELOCITY, VX, VY, WZ, Key
@@ -196,3 +200,26 @@ def test_a_restarted_connection_is_held_where_it_now_is() -> None:
     source.on_state(reading(description, {"arm/joint1/position": 0.9}, sequence=0))
 
     assert source.command({}, None)[f"{J1}/position"] == 0.9
+
+
+@pytest.mark.parametrize(
+    ("sequence", "held"),
+    [(2, 0.5), (0, 0.48)],
+    ids=["same-connection-keeps-holds", "restarted-takes-them-again"],
+)
+def test_a_robot_that_goes_quiet_is_commanded_again_once_it_reports(
+    sequence: int, held: float
+) -> None:
+    description = arm()
+    source = ConnectionSource(description)
+    source.on_state(reading(description, {"arm/joint1/position": 0.3}, sequence=1))
+    source.command({J1: 0.5}, ControlMode.POSITION)
+
+    quiet = time.monotonic() + description.deadman_timeout_s + 0.01
+    assert not source.ready_for_control(quiet)
+    # Its joints stay in what tasks see.
+    assert source.read_joints().joint_positions[J1] == 0.3
+
+    source.on_state(reading(description, {"arm/joint1/position": 0.48}, sequence=sequence))
+    assert source.ready_for_control()
+    assert source.command({}, None)[f"{J1}/position"] == held
