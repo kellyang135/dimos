@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import threading
 import time
 
 from dimos.control.contract.description import ControlDescription, Limits, ResourceKind
@@ -70,6 +71,11 @@ class ConnectionSource:
       position is kept inside the joint's position limit. A joint that
       cannot be told a position gets velocity 0 instead.
 
+    When the robot's connection module restarts, its readings count up from
+    0 again. A reading numbered lower than the last one therefore means the
+    robot may have been moved while its driver was down, so every hold is
+    taken again from that reading.
+
     A base is told 0 on every axis. Sensors are never told anything.
 
     What tasks ask for is sent as is, even past a limit or to an interface
@@ -112,8 +118,17 @@ class ConnectionSource:
                 self._sensor_keys += [
                     (prefix, i, f"{prefix}{SEPARATOR}{i}") for i in resource.state_interfaces
                 ]
+        # Guards the reading and the flags below, which readings change and
+        # the tick loop reads.
+        self._lock = threading.Lock()
         self._latest: dict[str, float] | None = None
         self._received_at = 0.0
+        self._last_sequence: int | None = None
+        # A reading numbered lower than the last arrived: the connection
+        # restarted. The tick loop drops the holds when it sees this.
+        self._restarted = False
+        # Described again: send nothing until the robot reports again.
+        self._awaiting_reading = False
         # Joint name -> the position it is held at. Only the tick loop touches it.
         self._holds: dict[str, float] = {}
         self._last_warned = float("-inf")
@@ -144,20 +159,35 @@ class ConnectionSource:
                 self._last_warned = now
                 logger.warning(f"Dropped a reading from {self.hardware_id!r}: {error}")
             return
-        # Replaced whole, so the tick loop never sees half of one reading.
-        self._latest = values
-        self._received_at = time.time()
+        with self._lock:
+            if self._last_sequence is not None and frame.sequence < self._last_sequence:
+                self._restarted = True
+            self._last_sequence = frame.sequence
+            self._latest = values
+            self._received_at = time.time()
+            self._awaiting_reading = False
 
-    def adopt_reading(self, other: ConnectionSource) -> None:
-        """Start from ``other``'s latest reading, so a robot that is described
-        again does not lose its state for a tick. Held positions are not
-        taken: they are picked up again from the reading."""
-        self._latest = other._latest
-        self._received_at = other._received_at
+    def adopt(self, other: ConnectionSource) -> None:
+        """Carry on from ``other``, an earlier record of the same robot with the
+        same description: its reading and its holds.
+
+        Commands wait for the robot's next reading, so that a robot whose
+        connection module restarted is never sent where it was before.
+        """
+        with other._lock:
+            latest, received_at = other._latest, other._received_at
+            last_sequence, restarted = other._last_sequence, other._restarted
+        with self._lock:
+            self._latest, self._received_at = latest, received_at
+            self._last_sequence, self._restarted = last_sequence, restarted
+            self._awaiting_reading = True
+        self._holds = dict(other._holds)
 
     def ready_for_control(self) -> bool:
-        """Whether a reading has arrived, so commands can be built."""
-        return self._latest is not None
+        """Whether a command can be sent: the robot has reported, and has
+        reported again since it was last described."""
+        with self._lock:
+            return self._latest is not None and not self._awaiting_reading
 
     def read_joints(self) -> JointStateSnapshot:
         """The joints' latest positions, velocities and efforts.
@@ -196,6 +226,11 @@ class ConnectionSource:
             mode: How the winners drive their joints. ``None`` when no task
                 drives this robot this tick.
         """
+        with self._lock:
+            latest = self._latest
+            if self._restarted:
+                self._restarted = False
+                self._holds.clear()
         interface = _INTERFACE_BY_MODE.get(mode) if mode is not None else None
         values: dict[str, float] = {}
         for joint in self._joints:
@@ -212,7 +247,7 @@ class ConnectionSource:
                 values[velocity_key] = 0.0
                 self._holds.pop(joint.name, None)
                 continue
-            hold = self._hold(joint)
+            hold = self._hold(joint, latest)
             if hold is not None:
                 values[joint.command_keys[POSITION]] = hold
             elif velocity_key is not None:
@@ -221,17 +256,22 @@ class ConnectionSource:
             values[key] = 0.0
         return values
 
-    def _hold(self, joint: _Joint) -> float | None:
+    def _hold(self, joint: _Joint, latest: dict[str, float] | None) -> float | None:
         """Where to hold ``joint``, inside its position limit, or ``None`` if
-        it cannot be told a position or its position is unknown."""
+        it cannot be told a position or its position is unknown.
+
+        Args:
+            joint: The joint to hold.
+            latest: The robot's latest reading, to start a new hold from.
+        """
         if POSITION not in joint.command_keys:
             return None
         held = self._holds.get(joint.name)
         if held is None:
             measured_key = joint.state_keys.get(POSITION)
-            if measured_key is None or self._latest is None or measured_key not in self._latest:
+            if measured_key is None or latest is None or measured_key not in latest:
                 return None
-            held = self._latest[measured_key]
+            held = latest[measured_key]
             self._holds[joint.name] = held
         limit = joint.position_limit
         if limit is not None:

@@ -44,13 +44,14 @@ def arm(**kwargs: object) -> ControlDescription:
 
 
 def reading(
-    description: ControlDescription, values: dict[str, float] | None = None
+    description: ControlDescription, values: dict[str, float] | None = None, sequence: int = 0
 ) -> ControlValues:
     """A full reading from the robot: every key it reports, 0.0 unless given."""
     given = values or {}
     keys = description.state_keys()
     return ControlValues(
         source=description.source,
+        sequence=sequence,
         interface_names=list(keys),
         values=[given.get(key, 0.0) for key in keys],
     )
@@ -166,13 +167,32 @@ def test_a_base_is_told_zero_on_every_axis() -> None:
     assert source.command({}, None) == {"go2/base/vx": 0.0, "go2/base/vy": 0.0, "go2/base/wz": 0.0}
 
 
-def test_described_again_it_keeps_the_reading_but_not_the_holds() -> None:
+def test_described_again_it_keeps_its_holds_and_waits_for_the_next_reading() -> None:
     description = arm()
     before = source_at(description, {"arm/joint1/position": 0.3})
     before.command({J1: 0.5}, ControlMode.POSITION)
 
     after = ConnectionSource(description)
-    after.adopt_reading(before)
+    after.adopt(before)
 
+    # Its joints are still known, but nothing is sent until it reports again.
+    assert after.read_joints().joint_positions[J1] == 0.3
+    assert not after.ready_for_control()
+
+    # A held arm sags a little below its target; the hold stays on the target.
+    after.on_state(reading(description, {"arm/joint1/position": 0.49}, sequence=1))
     assert after.ready_for_control()
-    assert after.command({}, None)[f"{J1}/position"] == 0.3
+    assert after.command({}, None)[f"{J1}/position"] == 0.5
+
+
+def test_a_restarted_connection_is_held_where_it_now_is() -> None:
+    description = arm()
+    source = ConnectionSource(description)
+    source.on_state(reading(description, {"arm/joint1/position": 0.3}, sequence=7))
+    source.command({J1: 0.5}, ControlMode.POSITION)
+    assert source.command({}, None)[f"{J1}/position"] == 0.5
+
+    # It restarted and counts from 0 again; it was moved by hand meanwhile.
+    source.on_state(reading(description, {"arm/joint1/position": 0.9}, sequence=0))
+
+    assert source.command({}, None)[f"{J1}/position"] == 0.9

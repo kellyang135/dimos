@@ -438,8 +438,9 @@ class ControlCoordinator(Module):
             for source, description in found.items():
                 connection = ConnectionSource(description)
                 previous = self._connections.get(source)
+                # Keeps an idle robot's holds when something unrelated is loaded.
                 if previous is not None and previous.description == description:
-                    connection.adopt_reading(previous)
+                    connection.adopt(previous)
                 connections[source] = connection
             for previous in self._connections.values():
                 for joint in previous.joint_names:

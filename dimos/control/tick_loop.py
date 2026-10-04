@@ -91,7 +91,7 @@ class TickLoop:
         log_ticks: Whether to log tick information
         connections: Robots driven through connection modules, by name
         command_callback: Called once per tick for each robot in
-            ``connections`` that has reported, with (name, command by key)
+            ``connections`` that is ready, with (name, command by key)
     """
 
     def __init__(
@@ -254,14 +254,14 @@ class TickLoop:
                         per_hardware[hw.hardware_id] = list(state)
                 except Exception as e:
                     logger.error(f"Failed to read {hw.hardware_id}: {e}")
+            # Read whether or not a robot can be commanded yet: one described
+            # again keeps its joints in the state while it waits to report.
             for source in self._connections.values():
-                if not source.ready_for_control():
-                    continue
                 joints = source.read_joints()
                 joint_positions.update(joints.joint_positions)
                 joint_velocities.update(joints.joint_velocities)
                 joint_efforts.update(joints.joint_efforts)
-                if self._publish_robot_callback:
+                if self._publish_robot_callback and joints.joint_positions:
                     per_hardware[source.hardware_id] = list(joints.joint_positions)
 
         snapshot = JointStateSnapshot(
@@ -472,8 +472,8 @@ class TickLoop:
     ) -> None:
         """Send every robot behind a connection module its complete command.
 
-        Every robot that has reported gets one, every tick, whether or not a
-        task drives it, so its connection's deadman never fires while the
+        Every robot that is ready gets one, every tick, whether or not a task
+        drives it, so its connection's deadman never fires while the
         coordinator runs.
         """
         publish = self._command_callback

@@ -320,6 +320,51 @@ def test_tasks_drive_connection_joints_and_see_their_sensors(rig: Callable[..., 
     assert task.last_state.joints.get_velocity("arm/joint1") is None
 
 
+def test_found_again_a_robot_keeps_its_holds_and_waits_to_report(
+    rig: Callable[..., Rig],
+) -> None:
+    r = rig()
+    connection = StandIn("Mock", [arm()])
+    r.find(connection)
+    r.report(arm(), {"arm/joint1/position": 0.3})
+    r.tick()
+    # A held arm sags a little below where it is held.
+    r.report(arm(), {"arm/joint1/position": 0.29})
+    r.tick()
+    assert [frame.as_dict()["arm/joint1/position"] for frame in r.sent] == [0.3, 0.3]
+
+    # Something unrelated was loaded, so every connection module is found again.
+    r.find(StandIn("Camera"), connection)
+    r.tick()
+    assert len(r.sent) == 2
+    assert r.coordinator.get_joint_positions()["arm/joint1"] == 0.29
+
+    # Still held where it was, not where it sagged to.
+    r.report(arm(), {"arm/joint1/position": 0.28})
+    r.tick()
+    assert r.sent[-1].as_dict()["arm/joint1/position"] == 0.3
+
+
+def test_a_robot_described_differently_waits_for_a_reading_in_its_new_shape(
+    rig: Callable[..., Rig],
+) -> None:
+    r = rig()
+    connection = StandIn("Mock", [arm(joints=2)])
+    r.find(connection)
+    r.report(arm(joints=2))
+    r.tick()
+
+    connection.descriptions = [arm(joints=3)]
+    r.find(connection)
+    r.tick()
+    assert len(r.sent) == 1
+    assert r.coordinator.get_joint_positions() == {}
+
+    r.report(arm(joints=3))
+    r.tick()
+    assert len(r.sent[-1].interface_names) == 3
+
+
 def test_with_the_option_on_a_robot_also_gets_its_own_topic(rig: Callable[..., Rig]) -> None:
     r = rig(ArmPortCoordinator, publish_robot_commands=True)
     own: list[ControlValues] = []
