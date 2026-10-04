@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 from dimos.control.components import HardwareComponent, HardwareType, make_joints
+from dimos.control.connection.mock_connection import MockConnectionModule
 from dimos.control.coordinator import ControlCoordinator
 from dimos.control.tasks.trajectory_task.trajectory_task import joint_trajectory_task
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.stream import Out
 from dimos.msgs.sensor_msgs.JointState import JointState
 
@@ -60,4 +62,12 @@ coordinator_dual_mock = _DualMockCoordinator.blueprint(
     tasks=[
         joint_trajectory_task([*_mock_left.joints, *_mock_right.joints]),
     ],
+)
+
+# A pretend 7-joint arm called "mock", driven through a connection module
+# instead of an adapter: the coordinator finds it when the system starts, reads
+# its joints on control_state and sends it a command on control_command every tick.
+coordinator_mock_connection = autoconnect(
+    ControlCoordinator.blueprint(tasks=[joint_trajectory_task(make_joints("mock", 7))]),
+    MockConnectionModule.blueprint(source="mock", joints=7),
 )
