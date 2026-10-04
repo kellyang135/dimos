@@ -589,6 +589,25 @@ class TestControlCoordinatorTrajectoryExecution:
         mock_adapter.write_joint_positions.assert_not_called()
         assert not trajectory_task.is_active()
 
+    def test_a_task_added_during_an_estop_is_stopped_too(
+        self,
+        make_coordinator,
+        connected_hardware,
+        trajectory_task,
+        simple_trajectory,
+    ):
+        coordinator = make_coordinator()
+        coordinator.add_hardware(connected_hardware.adapter, connected_hardware.component)
+        assert coordinator.set_estop(True)
+
+        coordinator.add_task(trajectory_task, task_type="trajectory")
+
+        refused = coordinator.execute_trajectory(simple_trajectory)
+        assert refused.status is TrajectoryExecutionStatus.ESTOPPED
+        assert coordinator.set_estop(False)
+        accepted = coordinator.execute_trajectory(simple_trajectory)
+        assert accepted.status is TrajectoryExecutionStatus.ACCEPTED
+
 
 class TestJointTrajectoryTask:
     def test_config_requires_at_least_one_joint(self):

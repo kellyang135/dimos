@@ -252,15 +252,19 @@ class ConnectionModule(Module, ABC):
             )
 
     @rpc
-    def halt_robot(self) -> None:
+    def halt_robot(self) -> bool:
         """Stop the robot moving now, by calling the driver's ``halt``.
 
         Waits for a ``write`` in progress to finish first. Does nothing before
         the hardware is connected or once the module has stopped. Later
         commands are still obeyed: whoever sends them must stop sending.
+
+        Returns:
+            True if ``halt`` ran and did not raise. False if it raised (the
+            error is in ``status``), or the hardware is not connected.
         """
         logger.warning(f"{self._label}: halt requested")
-        self._halt()
+        return self._halt()
 
     def publish_state(self, values: Mapping[str, float]) -> None:
         """Publish one set of readings on ``control_state``.
@@ -361,16 +365,19 @@ class ConnectionModule(Module, ABC):
         logger.warning(f"{self._label}: no command for {self._deadman_s} s, halting")
         self._halt()
 
-    def _halt(self) -> None:
+    def _halt(self) -> bool:
+        """Call ``halt`` if connected. True if it ran and did not raise."""
         with self._hardware_lock:
-            if self._connected:
-                self._call_halt()
+            return self._connected and self._call_halt()
 
-    def _call_halt(self) -> None:
+    def _call_halt(self) -> bool:
+        """Call ``halt``. True if it did not raise; a failure goes to ``status``."""
         try:
             self.halt()
         except Exception as error:
             self._report(f"halt failed: {type(error).__name__}: {error}")
+            return False
+        return True
 
     def _state_loop(self) -> None:
         period = 1.0 / max(d.state_rate_hz for d in self._descriptions.values())

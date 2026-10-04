@@ -137,7 +137,7 @@ class ConnectionSource:
         # arrived (the connection restarted), or drop_holds was called. The
         # tick loop drops them when it sees this.
         self._drop_holds = False
-        # Described again: send nothing until the robot reports again.
+        # Described again, or holds dropped: send nothing until the robot reports again.
         self._awaiting_reading = False
         # Joint name -> the position it is held at. Only the tick loop touches it.
         self._holds: dict[str, float] = {}
@@ -212,10 +212,12 @@ class ConnectionSource:
         self._holds = dict(other._holds)
 
     def drop_holds(self) -> None:
-        """Forget every held position. The next command holds each joint where
-        the robot's latest reading has it, not where it was last told to be."""
+        """Forget every held position, and send nothing until the robot reports
+        again. The next command then holds each joint where that new reading
+        has it, not where it was last told to be."""
         with self._lock:
             self._drop_holds = True
+            self._awaiting_reading = True
 
     def ready_for_control(self, now: float | None = None) -> bool:
         """Whether a command can be sent: the robot has reported again since it

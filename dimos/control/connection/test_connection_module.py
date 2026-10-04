@@ -145,6 +145,12 @@ class FailingWrite(MockConnectionModule):
         raise RuntimeError("motor said no")
 
 
+class FailingHalt(MockConnectionModule):
+    def halt(self) -> None:
+        super().halt()
+        raise RuntimeError("brake said no")
+
+
 class PushedState(MockConnectionModule):
     """Never polled: readings only go out when the test publishes them."""
 
@@ -354,9 +360,15 @@ def test_halt_robot_halts_at_once_every_time_it_is_called(rig: Callable[..., Rig
     # A driver overrides halt, so halting on request needs an RPC of its own.
     assert "halt_robot" in MockConnectionModule.rpcs
     r = rig()
-    r.module.halt_robot()
-    r.module.halt_robot()
+    assert r.module.halt_robot()
+    assert r.module.halt_robot()
     assert r.module.halts == 2
+
+
+def test_halt_robot_says_so_when_halt_fails(rig: Callable[..., Rig]) -> None:
+    r = rig(FailingHalt)
+    assert r.module.halt_robot() is False
+    assert "brake said no" in (r.module.status().last_error or "")
 
 
 def test_halt_robot_waits_for_a_write_in_progress(rig: Callable[..., Rig]) -> None:
@@ -379,7 +391,7 @@ def test_halt_robot_waits_for_a_write_in_progress(rig: Callable[..., Rig]) -> No
 def test_halt_robot_after_stop_does_nothing(rig: Callable[..., Rig]) -> None:
     r = rig()
     r.module.stop()
-    r.module.halt_robot()
+    assert r.module.halt_robot() is False
     assert r.module.halts == 1
 
 

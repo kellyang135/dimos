@@ -222,6 +222,11 @@ class ControlCoordinator(Module):
         # Set by set_estop: while set, no robot behind a connection module is
         # sent anything.
         self._estopped = False
+        # Set by set_estop while tasks are stopped, so a task added meanwhile
+        # is stopped too. Guarded by _task_lock.
+        self._tasks_estopped = False
+        # Held through each whole set_estop, so a stop and a clear never overlap.
+        self._estop_lock = threading.Lock()
         # Counts every command frame sent, so each robot sees rising numbers.
         self._command_sequence = 0
         self._control_state_unsub: Callable[[], None] | None = None
@@ -674,6 +679,11 @@ class ControlCoordinator(Module):
             if task.name in self._tasks:
                 logger.warning(f"Task {task.name} already registered")
                 return False
+            if self._tasks_estopped:
+                # Added during an emergency stop: stopped like the rest.
+                handler = getattr(task, "set_estop", None)
+                if callable(handler):
+                    handler(True)
             if isinstance(task, JointTrajectoryTask):
                 if self._trajectory_task is not None:
                     raise ValueError("ControlCoordinator supports exactly one JointTrajectoryTask")
@@ -912,35 +922,49 @@ class ControlCoordinator(Module):
 
         A synchronous RPC, not a stream, so an E-STOP can't be dropped under
         load. Stopping waits up to about a second for the halts to be confirmed.
+        Calls run one at a time, in order: a clear sent during a stop waits for
+        the stop's halts to finish.
 
         Args:
             estopped: True to stop, False to clear.
 
         Returns:
-            False if a connection module did not confirm its halt (it is named
-            in the log), otherwise True.
+            False if a connection module did not confirm that its robot halted
+            (it is named in the log), otherwise True.
         """
-        if not estopped:
-            self._set_tasks_estop(False)
-            with self._hardware_lock:
-                for connection in self._connections.values():
-                    connection.drop_holds()
-                self._estopped = False
-            logger.warning("E-STOP cleared at coordinator")
-            return True
+        with self._estop_lock:
+            if not estopped:
+                self._set_tasks_estop(False)
+                with self._hardware_lock:
+                    for connection in self._connections.values():
+                        # Sends nothing until the robot reports again.
+                        connection.drop_holds()
+                    self._estopped = False
+                logger.warning("E-STOP cleared at coordinator")
+                return True
 
-        logger.warning("E-STOP latched at coordinator")
-        self._estopped = True
-        # The tick loop sends commands holding this lock, so once it is taken,
-        # a tick already sending has finished and no other will send.
-        with self._hardware_lock:
-            modules = set(self._connection_modules.values())
-        self._set_tasks_estop(True)
-        return modules <= self._call_connections("halt_robot").keys()
+            logger.warning("E-STOP latched at coordinator")
+            self._estopped = True
+            # The tick loop sends commands holding this lock, so once it is
+            # taken, a tick already sending has finished and no other will send.
+            with self._hardware_lock:
+                modules = sorted(set(self._connection_modules.values()))
+            self._set_tasks_estop(True)
+            answers = self._call_connections("halt_robot")
+            halted = True
+            for module in modules:
+                if module not in answers:
+                    halted = False  # Already logged by _call_connections.
+                elif answers[module] is not True:
+                    halted = False
+                    logger.error(f"{module!r} could not halt its robot; see its status()")
+            return halted
 
     def _set_tasks_estop(self, estopped: bool) -> None:
-        """Call ``set_estop(estopped)`` on every task that has it."""
+        """Call ``set_estop(estopped)`` on every task that has it, and remember
+        it for tasks added later."""
         with self._task_lock:
+            self._tasks_estopped = estopped
             for task in self._tasks.values():
                 handler = getattr(task, "set_estop", None)
                 if callable(handler):

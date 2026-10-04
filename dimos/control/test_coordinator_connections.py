@@ -32,6 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 import os
 import signal
+import threading
 import time
 from typing import Any
 
@@ -117,7 +118,8 @@ class StandIn:
     """Plays a module proxy: ``rpcs`` names what it serves.
 
     A connection stand-in also answers ``halt_robot`` and ``status`` when the
-    coordinator calls them by name, unless ``answers`` is False.
+    coordinator calls them by name, unless ``answers`` is False. ``halt_robot``
+    answers ``halted``, and first waits for ``halt_gate`` when one is given.
     """
 
     def __init__(
@@ -134,7 +136,10 @@ class StandIn:
         self.asked = 0
         self.closed = False
         self.answers = True
+        self.halted = True
         self.halts = 0
+        self.halting = threading.Event()
+        self.halt_gate: threading.Event | None = None
 
     def describe_control(self) -> list[ControlDescription]:
         self.asked += 1
@@ -142,10 +147,14 @@ class StandIn:
             raise self.error
         return list(self.descriptions)
 
-    def halt_robot(self) -> None:
+    def halt_robot(self) -> bool:
         self.halts += 1
+        self.halting.set()
+        if self.halt_gate is not None:
+            self.halt_gate.wait(5.0)
         if self.error is not None:
             raise self.error
+        return self.halted
 
     def status(self) -> ConnectionStatus:
         return STATUS
@@ -512,8 +521,10 @@ def test_a_module_that_fails_to_halt_is_named_and_does_not_hold_up_the_rest(
     silent = StandIn("Silent", [arm()])
     silent.answers = False
     broken = StandIn("Broken", [arm(name="left")])
+    refuses = StandIn("Refuses", [arm(name="right")])
+    refuses.halted = False
     working = StandIn("Working", [base()])
-    r.find(silent, broken, working)
+    r.find(silent, broken, refuses, working)
     broken.error = RuntimeError("no")
 
     assert r.coordinator.set_estop(True) is False
@@ -523,6 +534,45 @@ def test_a_module_that_fails_to_halt_is_named_and_does_not_hold_up_the_rest(
     logged = str(error.call_args_list)
     assert "'Silent' did not answer halt_robot" in logged
     assert "'Broken' failed halt_robot" in logged
+    assert "'Refuses' could not halt its robot" in logged
+    assert "'Working'" not in logged
+
+
+def test_a_clear_sent_during_a_stop_waits_for_its_halts(rig: Callable[..., Rig]) -> None:
+    r = rig()
+    slow = StandIn("Slow", [arm()])
+    slow.halt_gate = threading.Event()
+    r.find(slow)
+    r.report(arm())
+    r.tick()
+    assert len(r.sent) == 1
+    results: dict[str, bool] = {}
+
+    def call(name: str, estopped: bool) -> threading.Thread:
+        thread = threading.Thread(
+            target=lambda: results.update({name: r.coordinator.set_estop(estopped)})
+        )
+        thread.start()
+        return thread
+
+    stopping = call("stop", True)
+    assert slow.halting.wait(2.0)
+    clearing = call("clear", False)
+    time.sleep(0.05)
+
+    # The clear waits behind the halt, so the arm is still sent nothing.
+    assert results == {}
+    r.report(arm())
+    r.tick()
+    assert len(r.sent) == 1
+
+    slow.halt_gate.set()
+    stopping.join(2.0)
+    clearing.join(2.0)
+    assert results == {"stop": True, "clear": True}
+    r.report(arm())
+    r.tick()
+    assert len(r.sent) == 2
 
 
 def test_clearing_the_estop_holds_each_joint_where_the_robot_now_is(
@@ -545,10 +595,14 @@ def test_clearing_the_estop_holds_each_joint_where_the_robot_now_is(
     assert len(r.sent) == 1
 
     assert r.coordinator.set_estop(False)
+    # The last reading may predate the halt: nothing is sent until the next.
+    r.tick()
+    assert len(r.sent) == 1
+    r.report(arm(), {"arm/joint1/position": 0.41})
     r.tick()
 
     assert len(r.sent) == 2
-    assert r.sent[-1].as_dict() == {"arm/joint1/position": 0.4, "arm/joint2/position": 0.0}
+    assert r.sent[-1].as_dict() == {"arm/joint1/position": 0.41, "arm/joint2/position": 0.0}
 
 
 def test_connection_status_is_by_robot_and_none_for_a_silent_module(
