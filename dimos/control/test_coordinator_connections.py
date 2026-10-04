@@ -12,28 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the coordinator finding connection modules and driving their robots.
+"""Tests for the coordinator finding connection modules, driving their robots,
+and stopping them.
 
-Most run in-process: connection modules are stand-ins that only answer
-``describe_control``, readings are fed straight into ``control_state``, and the
-tick loop is stepped by hand, one tick at a time.
+Most run in-process: connection modules are stand-ins that answer
+``describe_control``, ``halt_robot`` and ``status``, readings are fed straight
+into ``control_state``, and the tick loop is stepped by hand, one tick at a time.
 
-The last two run end to end, with ``MockConnectionModule`` in real worker
-processes. Each sends the coordinator a trajectory and waits until the mock
+The last four run end to end, with ``MockConnectionModule`` in real worker
+processes. Two send the coordinator a trajectory and wait until the mock
 arm's readings, as the coordinator sees them, arrive at its end. That only
 happens if commands reach the mock on ``control_command`` and its readings
-come back on ``control_state``.
+come back on ``control_state``. The other two stop the mock: once with an
+emergency stop, once by killing the coordinator's process.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+import os
+import signal
 import time
 from typing import Any
 
 import pytest
 
 from dimos.control.components import HardwareComponent, HardwareType, make_joints
+from dimos.control.connection.connection_module import ConnectionStatus
 from dimos.control.connection.mock_connection import MockConnectionModule
 from dimos.control.contract.description import ControlDescription, Limits
 from dimos.control.contract.keys import EFFORT, POSITION, VX, VY, WZ, Key
@@ -67,10 +72,10 @@ from dimos.msgs.trajectory_msgs.TrajectoryPoint import TrajectoryPoint
 from dimos.robot.manipulators.common.mock import coordinator_mock_connection
 
 
-def arm(joints: int = 2, **kwargs: Any) -> ControlDescription:
-    """An arm called "arm" that reports and takes joint positions."""
+def arm(joints: int = 2, name: str = "arm", **kwargs: Any) -> ControlDescription:
+    """An arm, called "arm" unless named, that reports and takes joint positions."""
     return manipulator_description(
-        "arm",
+        name,
         [f"joint{i}" for i in range(1, joints + 1)],
         state=(POSITION,),
         command=(POSITION,),
@@ -98,8 +103,22 @@ def reading(
     )
 
 
+STATUS = ConnectionStatus(
+    connected=True,
+    last_state_time=1.0,
+    last_command_time=2.0,
+    deadman_fired=False,
+    last_rejection=None,
+    last_error=None,
+)
+
+
 class StandIn:
-    """Plays a module proxy: ``rpcs`` names what it serves."""
+    """Plays a module proxy: ``rpcs`` names what it serves.
+
+    A connection stand-in also answers ``halt_robot`` and ``status`` when the
+    coordinator calls them by name, unless ``answers`` is False.
+    """
 
     def __init__(
         self,
@@ -114,12 +133,22 @@ class StandIn:
         self.rpcs = {"start", "stop", *(["describe_control"] if connection else [])}
         self.asked = 0
         self.closed = False
+        self.answers = True
+        self.halts = 0
 
     def describe_control(self) -> list[ControlDescription]:
         self.asked += 1
         if self.error is not None:
             raise self.error
         return list(self.descriptions)
+
+    def halt_robot(self) -> None:
+        self.halts += 1
+        if self.error is not None:
+            raise self.error
+
+    def status(self) -> ConnectionStatus:
+        return STATUS
 
     def stop_rpc_client(self) -> None:
         self.closed = True
@@ -188,9 +217,23 @@ class Rig:
         coordinator.start()
         assert coordinator._tick_loop is not None
         self.tick = coordinator._tick_loop._tick
+        # Calls the coordinator makes by module name go to the stand-ins.
+        self.modules: dict[str, StandIn] = {}
+        coordinator.rpc.call = self._call  # type: ignore[method-assign, assignment]
 
     def find(self, *modules: StandIn) -> None:
+        self.modules = {module.remote_name: module for module in modules}
         self.coordinator.on_system_modules(list(modules))  # type: ignore[arg-type]
+
+    def _call(self, name: str, arguments: Any, answer: Callable[[Any], None]) -> Callable[[], None]:
+        module_name, method = name.split("/")
+        module = self.modules[module_name]
+        if module.answers:
+            try:
+                answer(getattr(module, method)(*arguments[0], **arguments[1]))
+            except Exception as error:
+                answer(error)
+        return lambda: None
 
     def report(
         self, description: ControlDescription, values: dict[str, float] | None = None
@@ -439,6 +482,91 @@ def test_a_robot_without_its_own_joints_port_is_still_driven(
     error.assert_not_called()
 
 
+def test_estop_sends_nothing_more_and_halts_each_connection_module_once(
+    rig: Callable[..., Rig],
+) -> None:
+    r = rig()
+    # One module running two robots, and a module that is not a connection.
+    both = StandIn("Both", [arm(), base()])
+    r.find(both, StandIn("Camera"))
+    r.report(arm())
+    r.report(base())
+    r.tick()
+    assert len(r.sent) == 2
+
+    assert r.coordinator.set_estop(True)
+
+    assert both.halts == 1
+    r.report(arm())
+    r.report(base())
+    r.tick()
+    assert len(r.sent) == 2
+
+
+def test_a_module_that_fails_to_halt_is_named_and_does_not_hold_up_the_rest(
+    rig: Callable[..., Rig], mocker: Any
+) -> None:
+    mocker.patch.object(coord_mod, "_CONNECTION_RPC_TIMEOUT_S", 0.05)
+    error = mocker.patch.object(coord_mod.logger, "error")
+    r = rig()
+    silent = StandIn("Silent", [arm()])
+    silent.answers = False
+    broken = StandIn("Broken", [arm(name="left")])
+    working = StandIn("Working", [base()])
+    r.find(silent, broken, working)
+    broken.error = RuntimeError("no")
+
+    assert r.coordinator.set_estop(True) is False
+
+    assert working.halts == 1
+    assert broken.halts == 1
+    logged = str(error.call_args_list)
+    assert "'Silent' did not answer halt_robot" in logged
+    assert "'Broken' failed halt_robot" in logged
+
+
+def test_clearing_the_estop_holds_each_joint_where_the_robot_now_is(
+    rig: Callable[..., Rig],
+) -> None:
+    r = rig()
+    r.find(StandIn("Mock", [arm()]))
+    task = SendsPositions({"arm/joint1": 0.5})
+    r.coordinator.add_task(task)
+    r.report(arm(), {"arm/joint1/position": 0.3})
+    r.tick()
+    assert r.sent[-1].as_dict()["arm/joint1/position"] == 0.5
+
+    r.coordinator.set_estop(True)
+    # SendsPositions has no set_estop; take it away so nothing drives the arm.
+    r.coordinator.remove_task(task.name)
+    # Halted short of where it was told to go.
+    r.report(arm(), {"arm/joint1/position": 0.4})
+    r.tick()
+    assert len(r.sent) == 1
+
+    assert r.coordinator.set_estop(False)
+    r.tick()
+
+    assert len(r.sent) == 2
+    assert r.sent[-1].as_dict() == {"arm/joint1/position": 0.4, "arm/joint2/position": 0.0}
+
+
+def test_connection_status_is_by_robot_and_none_for_a_silent_module(
+    rig: Callable[..., Rig], mocker: Any
+) -> None:
+    mocker.patch.object(coord_mod, "_CONNECTION_RPC_TIMEOUT_S", 0.05)
+    r = rig()
+    silent = StandIn("Silent", [arm(name="left")])
+    silent.answers = False
+    r.find(StandIn("Both", [arm(), base()]), silent, StandIn("Camera"))
+
+    assert r.coordinator.get_connection_status() == {
+        "arm": STATUS,
+        "go2": STATUS,
+        "left": None,
+    }
+
+
 # End to end, in real worker processes.
 
 JOINTS = make_joints("mock", 7)
@@ -519,3 +647,44 @@ def test_mock_loaded_after_the_coordinator_is_still_driven(build: Build) -> None
     system.load_blueprint(MockConnectionModule.blueprint(deadman_timeout_s=DEADMAN_S))
 
     drive_to_target(system)
+
+
+def test_estop_halts_the_mock_and_clearing_drives_it_again(build: Build) -> None:
+    system = build(
+        coordinator_mock_connection,
+        **{MockConnectionModule.name: {"deadman_timeout_s": DEADMAN_S}},
+    )
+    coordinator = system.get_instance(ControlCoordinator)
+    mock = system.get_instance(MockConnectionModule)
+    assert wait_until(lambda: mock.status().last_command_time is not None)
+
+    assert coordinator.set_estop(True)
+    stopped_at = time.time()
+    status = coordinator.get_connection_status()["mock"]
+    assert status is not None and status.connected
+    # Sent nothing more, so its deadman fires too.
+    assert wait_until(lambda: mock.status().deadman_fired, timeout_s=DEADMAN_S + 2.0)
+
+    assert coordinator.set_estop(False)
+    assert wait_until(lambda: (mock.status().last_command_time or 0.0) > stopped_at + DEADMAN_S)
+    assert not mock.status().deadman_fired
+
+
+def test_killing_the_coordinator_lets_the_mock_deadman_halt_it(build: Build) -> None:
+    system = build(
+        coordinator_mock_connection,
+        **{MockConnectionModule.name: {"deadman_timeout_s": DEADMAN_S}},
+    )
+    mock = system.get_instance(MockConnectionModule)
+    assert wait_until(lambda: mock.status().last_command_time is not None)
+    assert not mock.status().deadman_fired
+
+    workers = system._managers["python"].workers  # type: ignore[attr-defined]
+    [worker] = [w for w in workers if "ControlCoordinator" in w.module_names]
+    assert "MockConnectionModule" not in worker.module_names
+    assert worker.pid is not None
+    os.kill(worker.pid, signal.SIGKILL)
+
+    # The deadman fires DEADMAN_S after the last command; the rest is slack
+    # for a busy CI machine.
+    assert wait_until(lambda: mock.status().deadman_fired, timeout_s=DEADMAN_S + 2.0)

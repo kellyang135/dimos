@@ -100,6 +100,9 @@ class ConnectionModule(Module, ABC):
     sender that restarts counting from 0 is accepted. The next accepted
     command starts the deadman again.
 
+    Halting on request: the ``halt_robot`` RPC calls ``halt`` at once. The
+    coordinator calls it on an emergency stop.
+
     ``write`` and ``halt`` never run at the same time. Commands and the
     deadman share the module's event loop, so a ``write`` that hangs stops
     both: the deadman cannot fire and no later command is handled until it
@@ -187,7 +190,7 @@ class ConnectionModule(Module, ABC):
 
         Must be safe to call any number of times, including before any
         command. Called when commands stop arriving, after a failed ``write``,
-        and when the module stops.
+        when ``halt_robot`` is called, and when the module stops.
         """
 
     @rpc
@@ -247,6 +250,17 @@ class ConnectionModule(Module, ABC):
                 last_rejection=self._last_rejection,
                 last_error=self._last_error,
             )
+
+    @rpc
+    def halt_robot(self) -> None:
+        """Stop the robot moving now, by calling the driver's ``halt``.
+
+        Waits for a ``write`` in progress to finish first. Does nothing before
+        the hardware is connected or once the module has stopped. Later
+        commands are still obeyed: whoever sends them must stop sending.
+        """
+        logger.warning(f"{self._label}: halt requested")
+        self._halt()
 
     def publish_state(self, values: Mapping[str, float]) -> None:
         """Publish one set of readings on ``control_state``.

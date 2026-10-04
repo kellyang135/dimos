@@ -202,6 +202,19 @@ def test_a_restarted_connection_is_held_where_it_now_is() -> None:
     assert source.command({}, None)[f"{J1}/position"] == 0.9
 
 
+def test_dropped_holds_are_taken_again_from_the_latest_reading() -> None:
+    description = arm()
+    source = source_at(description, {"arm/joint1/position": 0.3})
+    source.command({J1: 0.5}, ControlMode.POSITION)
+    # Halted short of where it was told to go.
+    source.on_state(reading(description, {"arm/joint1/position": 0.4}, sequence=1))
+    assert source.command({}, None)[f"{J1}/position"] == 0.5
+
+    source.drop_holds()
+
+    assert source.command({}, None)[f"{J1}/position"] == 0.4
+
+
 @pytest.mark.parametrize(
     ("sequence", "held"),
     [(2, 0.5), (0, 0.48)],
