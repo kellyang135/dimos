@@ -99,3 +99,29 @@ dimos --replay --replay-db recordings/<run-id>/memory.db run unitree-go2
   drops and warns. The Rust recorder uses its existing native encoding pool and
   ordered writer pipeline.
 - We also still have explicit recorder modules (`unitree-go2-memory`, `unitree-go2-mid360-record`, `unitree-g1-record`) that are unaffected and still record their own streams. These will be deprecated shortly.
+
+
+## Rust MCAP inspection and generic replay
+
+Native MCAP recordings are opened by the generic memory reader. Built-in LCM,
+LZ4+LCM, JPEG and JSON String channels select their decoder from the channel
+encoding/type metadata; unrecognized types remain raw bytes. Legacy Go2 DDS
+recordings retain their aliases and compatibility decoders. Prefer
+`dimos.memory.cli.dataset.open_dataset()` over direct `Go2McapStore` construction,
+which now emits a deprecation warning. No file conversion or legacy codec removal
+is part of this change.
+
+For a reproducible synthetic record → Ctrl+C/flush → summary → Rerun export →
+typed replay check, see [the native MCAP example](/examples/native-mcap/README.md).
+It uses the standard CLI and an isolated loopback session, without a robot driver.
+
+```sh skip
+dimos mem summary recording.mcap
+dimos mem rerun recording.mcap --no-gui --out recording.rrd
+dimos --replay-db recording.mcap run replay
+```
+
+Generic replay republishes recorded streams. Use an isolated environment when a
+file may contain command topics. `--replay` is a Boolean connection selector,
+not a filename; Go2's `--replay --replay-db recording.db run unitree-go2` path
+remains SQLite-only.

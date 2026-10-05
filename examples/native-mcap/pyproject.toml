@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "native-mcap-demo"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[project.entry-points."dimos.blueprints"]
+sensors = "native_mcap_demo.blueprints:sensors"
+watch = "native_mcap_demo.blueprints:watch"
