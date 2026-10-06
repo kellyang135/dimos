@@ -340,5 +340,4 @@ publishing job currently covers x86-64 Linux; other supported targets may
 compile locally. An absent cached result permits a source build; download or
 build failures are reported rather than retried through a separate installer.
 
-See [Nix installation](/docs/installation/nix.md) and the
-[preparation decision](/docs/adr/0001-native-package-preparation.md).
+See [Nix installation](/docs/installation/nix.md).
